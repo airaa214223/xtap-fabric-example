@@ -1,0 +1,41 @@
+services:
+  github-agent:
+    build: ./github-agent
+    ports:
+      - "8001:8001"
+    networks:
+      - sre-net
+
+  datadog-agent:
+    build: ./datadog-agent
+    ports:
+      - "8002:8002"
+    networks:
+      - sre-net
+
+  cicd-agent:
+    build: ./cicd-agent
+    ports:
+      - "8003:8003"
+    networks:
+      - sre-net
+
+  sre-coordinator:
+    build: ./sre-coordinator
+    depends_on:
+      - github-agent
+      - datadog-agent
+      - cicd-agent
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - SCENARIO=${SCENARIO:-simple}
+      - GITHUB_AGENT_URL=http://github-agent:8001
+      - DATADOG_AGENT_URL=http://datadog-agent:8002
+      - CICD_AGENT_URL=http://cicd-agent:8003
+    networks:
+      - sre-net
+
+networks:
+  sre-net:
+    driver: bridge
