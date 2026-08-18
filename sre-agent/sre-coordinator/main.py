@@ -1,4 +1,4 @@
-"""SRE coordinator — LangGraph ReAct agent orchestrating downstream HTTP services."""
+"""SRE coordinator — LangGraph ReAct agent with XTap Fabric identity and hops."""
 
 from __future__ import annotations
 
@@ -8,11 +8,18 @@ import os
 import sys
 
 import httpx
+from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
 from mock_slack import get_alert
-from tools import TRACKER, get_tools, print_baseline_summary, reset_tracker
+from tools import TRACKER, TOOL_FUNCTIONS, print_baseline_summary, reset_tracker
+from xtap_runtime import (
+    complete_current_task,
+    consent_for_task,
+    enroll_this_agent,
+    set_receiver_client_id,
+)
 
 GITHUB_AGENT_URL = os.environ.get("GITHUB_AGENT_URL", "http://github-agent:8001")
 DATADOG_AGENT_URL = os.environ.get("DATADOG_AGENT_URL", "http://datadog-agent:8002")
@@ -53,6 +60,8 @@ async def wait_for_agents() -> None:
                 try:
                     resp = await client.get(url)
                     resp.raise_for_status()
+                    payload = resp.json()
+                    set_receiver_client_id(name, payload.get("client_id"))
                 except Exception:
                     all_ok = False
                     print(f"  {name} not ready yet...", flush=True)
@@ -75,15 +84,15 @@ async def poll_slack_for_alert(scenario: str) -> dict:
     return alert
 
 
-def build_agent():
+def build_graph(tools: list):
     model_name = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
     llm = ChatOpenAI(model=model_name, temperature=0)
-    return create_react_agent(llm, get_tools(), prompt=SYSTEM_PROMPT)
+    return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 
-async def run_investigation(alert: dict, scenario: str) -> None:
+async def run_investigation(alert: dict, scenario: str, tools: list) -> None:
     reset_tracker()
-    agent = build_agent()
+    graph = build_graph(tools)
 
     user_message = (
         f"Production alert received:\n"
@@ -95,7 +104,7 @@ async def run_investigation(alert: dict, scenario: str) -> None:
     print("--- SRE Coordinator: starting investigation ---\n", flush=True)
 
     final_content = ""
-    async for event in agent.astream(
+    async for event in graph.astream(
         {"messages": [("user", user_message)]},
         stream_mode="values",
     ):
@@ -133,9 +142,29 @@ async def main() -> None:
         print("ERROR: OPENAI_API_KEY environment variable is required.", flush=True)
         sys.exit(1)
 
+    fabric_agent = await enroll_this_agent(
+        "sre-coordinator",
+        "SRE Coordinator",
+        "Coordinates SRE debugging across github, datadog, and cicd agents",
+    )
     await wait_for_agents()
     alert = await poll_slack_for_alert(scenario)
-    await run_investigation(alert, scenario)
+
+    task_content = (
+        f"Investigate production alert on {alert['service']}: {alert['message']}"
+    )
+    print("Starting Mode A consent (open the URL in a browser and Approve)...", flush=True)
+    authority = await consent_for_task(fabric_agent, task_content)
+    tools = [
+        StructuredTool.from_function(fn, name=fn.__name__)
+        for fn in TOOL_FUNCTIONS
+    ]
+
+    try:
+        await run_investigation(alert, scenario, tools)
+    finally:
+        await complete_current_task()
+        print("Fabric task completed.", flush=True)
 
 
 if __name__ == "__main__":

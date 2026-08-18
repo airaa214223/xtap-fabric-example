@@ -6,7 +6,7 @@ This repository contains standalone agent examples demonstrating [XTAP Fabric](h
 
 | Folder | Description | Status |
 |--------|-------------|--------|
-| [sre-agent](./sre-agent/) | Multi-service SRE debugging demo — baseline (no Fabric) | ✅ Step 1 complete |
+| [sre-agent](./sre-agent/) | Multi-service SRE debugging demo with Fabric enroll, consent, and signed hops | Fabric wrap |
 
 ## Adding New Examples
 

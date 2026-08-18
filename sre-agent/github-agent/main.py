@@ -1,13 +1,28 @@
-"""GitHub agent — plain FastAPI wrapper over mock_github."""
+"""GitHub agent — FastAPI mock with XTap Fabric enroll + accept_incoming_task."""
 
 from __future__ import annotations
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from mock_github import commit_and_push, list_files, read_repo
+from xtap_runtime import enroll_this_agent, health_payload, install_accept_middleware
 
-app = FastAPI(title="github-agent", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.xtap_agent = await enroll_this_agent(
+        "github-agent",
+        "GitHub Agent",
+        "Mock GitHub read/commit service for the SRE demo",
+    )
+    yield
+
+
+app = FastAPI(title="github-agent", version="0.1.0", lifespan=lifespan)
+install_accept_middleware(app)
 
 
 class CommitRequest(BaseModel):
@@ -17,7 +32,7 @@ class CommitRequest(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return health_payload()
 
 
 @app.get("/read")

@@ -1,41 +1,96 @@
+x-xtap-build-args: &xtap-build-args
+  PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+  PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://pypi.org/simple}
+
+x-xtap-shared-env: &xtap-shared-env
+  XTAP_URL: ${XTAP_URL}
+  XTAP_TENANT_ID: ${XTAP_TENANT_ID}
+  XTAP_KEY_PASSPHRASE: ${XTAP_KEY_PASSPHRASE}
+  XTAP_AGENT_STATE_DIR: /data/xtap
+
 services:
   github-agent:
-    build: ./github-agent
+    build:
+      context: ./github-agent
+      args:
+        <<: *xtap-build-args
     ports:
       - "8001:8001"
+    environment:
+      <<: *xtap-shared-env
+      XTAP_SOFTWARE_ID: ${GITHUB_AGENT_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${GITHUB_AGENT_SOFTWARE_SECRET}
+    volumes:
+      - github-xtap-state:/data/xtap
     networks:
       - sre-net
 
   datadog-agent:
-    build: ./datadog-agent
+    build:
+      context: ./datadog-agent
+      args:
+        <<: *xtap-build-args
     ports:
       - "8002:8002"
+    environment:
+      <<: *xtap-shared-env
+      XTAP_SOFTWARE_ID: ${DATADOG_AGENT_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${DATADOG_AGENT_SOFTWARE_SECRET}
+    volumes:
+      - datadog-xtap-state:/data/xtap
     networks:
       - sre-net
 
   cicd-agent:
-    build: ./cicd-agent
+    build:
+      context: ./cicd-agent
+      args:
+        <<: *xtap-build-args
     ports:
       - "8003:8003"
+    environment:
+      <<: *xtap-shared-env
+      XTAP_SOFTWARE_ID: ${CICD_AGENT_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${CICD_AGENT_SOFTWARE_SECRET}
+    volumes:
+      - cicd-xtap-state:/data/xtap
     networks:
       - sre-net
 
   sre-coordinator:
-    build: ./sre-coordinator
+    build:
+      context: ./sre-coordinator
+      args:
+        <<: *xtap-build-args
     depends_on:
       - github-agent
       - datadog-agent
       - cicd-agent
+    ports:
+      - "8765:8765"
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
-      - SCENARIO=${SCENARIO:-simple}
-      - GITHUB_AGENT_URL=http://github-agent:8001
-      - DATADOG_AGENT_URL=http://datadog-agent:8002
-      - CICD_AGENT_URL=http://cicd-agent:8003
+      <<: *xtap-shared-env
+      XTAP_SOFTWARE_ID: ${SRE_COORDINATOR_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${SRE_COORDINATOR_SOFTWARE_SECRET}
+      XTAP_CONSENT_PORT: "8765"
+      XTAP_REDIRECT_URI: http://127.0.0.1:8765/callback
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      SCENARIO: ${SCENARIO:-simple}
+      GITHUB_AGENT_URL: http://github-agent:8001
+      DATADOG_AGENT_URL: http://datadog-agent:8002
+      CICD_AGENT_URL: http://cicd-agent:8003
+    volumes:
+      - coordinator-xtap-state:/data/xtap
     networks:
       - sre-net
 
 networks:
   sre-net:
     driver: bridge
+
+volumes:
+  github-xtap-state:
+  datadog-xtap-state:
+  cicd-xtap-state:
+  coordinator-xtap-state:
