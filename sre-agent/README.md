@@ -1,146 +1,135 @@
-# SRE Agent — Baseline Demo (No XTAP Fabric)
+# SRE Agent — XTap Fabric integration
 
-Multi-service SRE debugging demo where **each agent is its own Docker container**, orchestrated via docker-compose. This is the intentional "before" state: no identity, no consent, and no scope enforcement.
+Multi-service SRE debugging demo. **Each agent is its own process** (Docker Compose by default). Fabric wraps identity, human consent, and task-bound A2A credentials around the existing topology. GitHub / Datadog / CI/CD backends stay in-memory mocks.
 
 ## Architecture
 
 ```
-┌─────────────────┐     HTTP      ┌───────────────┐
-│ sre-coordinator │──────────────▶│ github-agent  │
-│  (LangGraph)    │──────────────▶│ datadog-agent │
-│                 │──────────────▶│  cicd-agent   │
-└─────────────────┘               └───────────────┘
+┌─────────────────┐   A2A hop    ┌───────────────┐
+│ sre-coordinator │─────────────▶│ github-agent  │
+│  (LangGraph)    │─────────────▶│ datadog-agent │
+│                 │─────────────▶│  cicd-agent   │
+└─────────────────┘              └───────────────┘
         ▲
    mock Slack poll
    (alert fixture)
 ```
 
-| Service | Role | LLM? |
-|---------|------|------|
-| **sre-coordinator** | Receives alert, reasons about investigation, calls other agents | Yes (LangGraph ReAct) |
-| **github-agent** | Read repo files, commit fixes | No (plain FastAPI) |
-| **datadog-agent** | Query logs for a service | No (plain FastAPI) |
-| **cicd-agent** | Trigger deploys | No (plain FastAPI) |
+| Service | Role | LLM? | Fabric role |
+|---------|------|------|-------------|
+| **sre-coordinator** | Receives alert, reasons, calls other agents | Yes (LangGraph ReAct) | Enrolls, collects consent, `delegate_subtask` + `prepare_a2a_presentation` |
+| **github-agent** | Read repo files, commit fixes | No (FastAPI) | Enrolls, `IncomingTaskMiddleware` + sender allowlist |
+| **datadog-agent** | Query logs for a service | No (FastAPI) | Same receive-side pattern |
+| **cicd-agent** | Trigger deploys | No (FastAPI) | Same receive-side pattern |
 
-All external systems (Slack, GitHub, Datadog, CI/CD) are mocked in-memory. No real credentials or APIs are used.
+Hops are real HTTP across a network boundary between **separately enrolled** ACT agents. That is an A2A presentation (`Authorization: DPoP <task token>`), **not** `SigningHttpClient` / `wrap_signed`. Specialist mocks are in-process; they do not call third-party HTTP.
+
+## Open questions before integrating XTap Fabric into sre-agent
+
+Answered from the repo, with flagged assumptions where the owner still needs to confirm:
+
+1. **Topology** — Four separately deployed processes. Coordinator → github / datadog / cicd are real HTTP hops. In-process LangGraph tool calls are not ACT hops. **Assumption:** all four services enroll with ACT; mocks behind the specialists are pure resources (no identity).
+2. **Outbound HTTP** — Coordinator tools call enrolled agents → A2A hop recipe. Specialist handlers call local mocks → no `SigningHttpClient`. OpenAI for the coordinator LLM is left on LangChain (not a Fabric-signed tool).
+3. **Task granularity** — One parent ACT task per Slack alert. One **new** child subtask per HTTP hop (no reuse across calls to the same specialist).
+4. **Consent placement** — After the mock Slack alert is received, before the graph runs. **Mode A** with `open_browser=False`: copy the printed URL and Approve. In Compose the callback binds `0.0.0.0:9876` and ACT is given `http://127.0.0.1:9876/callback` (published to the host). `consent_via_local_browser` cannot split bind vs redirect host, so this uses `LocalCallbackServer` + `start_consent_par`.
+5. **Standing vs per-request** — Independently consented parent authority per Slack message, then `delegate_subtask` per hop. Not standing authority across coordinator restarts (ephemeral DPoP keys are process-lifetime).
+6. **`client_id` distribution** — **Assumption:** env vars (`GITHUB_AGENT_CLIENT_ID`, …) with a shared `data/client-ids/` directory as fallback after each process enrolls. `resource=` on `delegate_subtask` is the receiver's ACT `client_id`, never a URL.
+7. **Actions** — **Assumption:** parent and children use `["read", "complete"]` as in the SDK eval guide. Commit/deploy are not separate ACT actions here; repo ownership (`payments-lib`) is still application policy.
+
+## Fabric invoke path
+
+```
+check_act_health / load_or_enroll_from_env   (once per process)
+  → wait for /health + peer client_ids
+  → Mode A: print authorize URL → Approve → http://127.0.0.1:9876/callback
+  → per HTTP hop: delegate_subtask → prepare_a2a_presentation → httpx
+       receiver: IncomingTaskMiddleware → request.state.xtap_incoming
+       allowlist immediate_sender == SRE_COORDINATOR_CLIENT_ID
+  → LangGraph astream (same tools / prompt as before)
+  → complete_task(each child) then complete_task(parent)   # coordinator only
+```
 
 ## Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/)
-- An **OpenAI API key** (or compatible endpoint via LangChain config)
+- Python **3.11+** (Compose images are 3.12)
+- Docker and Docker Compose, or four local terminals
+- Network access to Cloudsmith and to `XTAP_URL`
+- OpenAI API key
+- Entitlement token, per-process `SOFTWARE_ID` / `SOFTWARE_SECRET`, and passphrase
 
-## Quick Start
+Private evaluation: do not republish the wheels or commit the Cloudsmith token.
 
-1. Copy the environment template and set your API key:
+## Install (local venv)
 
-   ```bash
-   cp .env.example .env
-   # Edit .env and set OPENAI_API_KEY
-   ```
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 
-2. Start all services:
+pip install xtap-fabric xtap-fabric-starlette \
+  --index-url "https://airaa-airaa:${CLOUDSMITH_TOKEN}@dl.cloudsmith.io/basic/xtap/xtap/python/simple/" \
+  --extra-index-url https://pypi.org/simple
+
+python -c "import xtap_fabric; print(xtap_fabric.__version__)"
+```
+
+`--extra-index-url` is required so httpx / pydantic / cryptography still come from PyPI.
+
+## Quick start (Compose)
+
+Mode A prints an authorize URL (`open_browser=False`). After Approve, ACT redirects to `http://127.0.0.1:9876/callback`, which Compose publishes from the coordinator container.
+
+1. Copy `.env.example` to `.env` and fill ACT, Cloudsmith, software pairs, and `OPENAI_API_KEY`.
+
+2. Identity dirs are bind-mounted at `./data/<service>` (`XTAP_AGENT_STATE_DIR=/var/lib/xtap`). Do not wipe them between runs or processes re-enroll (new `client_id`s).
+
+3. Start:
 
    ```bash
    docker compose up --build
    ```
 
-3. The coordinator polls Slack, then continues on its own:
+4. When the coordinator prints `Copy this URL into your browser and Approve`, paste it, Approve, and wait for the tab to hit `http://127.0.0.1:9876/callback`.
 
-   ```
-   Polling Slack for alert messages...
-   Alert message received.
-   ```
-
-4. Watch the coordinator print live `[call]` lines as it reaches across container boundaries, then follow the agent's investigation to a fix.
+Set `SCENARIO=complicated` for the payments-lib path.
 
 ## Scenarios
 
-Select a scenario with the `SCENARIO` environment variable (or `--scenario` if running locally):
+| Scenario | Expected behavior |
+|----------|-------------------|
+| **simple** | Investigation converges on `checkout-service`, commits a fix there |
+| **complicated** | Agent may also read (and commit to) `payments-lib` |
 
-| Scenario | Command | Expected behavior |
-|----------|---------|-------------------|
-| **simple** | `SCENARIO=simple docker compose up --build` | Investigation converges on `checkout-service`, commits a fix there |
-| **complicated** | `SCENARIO=complicated docker compose up --build` | Agent may also read (and commit to) `payments-lib`, a repo owned by a different team |
+The investigation path is **not hardcoded** — the LLM decides which services and repos to query. Fabric authenticates hops; it does not encode repo ownership.
 
-```bash
-# Complicated scenario example
-SCENARIO=complicated docker compose up --build
-```
+## Running locally (without Docker)
 
-The investigation path is **not hardcoded** — the LLM decides which services and repos to query based on the alert text and mock data.
-
-## What to Watch For (Live Demo)
-
-### Simple scenario
-
-1. Coordinator queries Datadog for `checkout-service` logs
-2. Stack trace points to `src/handlers/checkout.py`
-3. Agent reads the file, identifies the bug (`validate_card` returns `bool`, code treats it as `dict`)
-4. Agent commits fix to `checkout-service` only
-5. Prints `FIX COMMITTED` with a fake MR URL
-
-### Complicated scenario
-
-Same flow, but the alert mentions a possible `payments-lib` dependency. The agent may:
-
-- Query Datadog for `payments-lib` logs
-- List and read files in `payments-lib`
-- Attempt commits there too
-
-At the end, a narration block appears:
-
-```
-=== Baseline run complete ===
-This agent read [and/or modified] payments-lib, a repository outside
-the team that owns this alert (checkout-service), and nothing in this
-architecture — across separate services — prevented it.
-```
-
-**This cross-boundary access is the point.** Nothing in this baseline stops it.
-
-## Service Endpoints (for manual testing)
-
-| Service | Port | Endpoints |
-|---------|------|-----------|
-| github-agent | 8001 | `GET /read?repo=&path=`, `GET /list?repo=`, `POST /commit` |
-| datadog-agent | 8002 | `POST /query?service=` |
-| cicd-agent | 8003 | `POST /deploy` `{product}` |
-
-## Running Locally (without Docker)
-
-Each service can run independently:
+Each specialist maps `GITHUB_AGENT_SOFTWARE_ID` (etc.) onto `XTAP_SOFTWARE_ID` if the latter is unset. Use **localhost URLs** consistently so DPoP `htu` matches (`str(request.url)`).
 
 ```bash
 # Terminal 1 — github-agent
-cd github-agent && pip install -r requirements.txt && uvicorn main:app --port 8001
+cd github-agent && pip install -r requirements.txt \
+  --index-url "$PIP_INDEX_URL" --extra-index-url https://pypi.org/simple
+uvicorn main:app --port 8001
 
-# Terminal 2 — datadog-agent
-cd datadog-agent && pip install -r requirements.txt && uvicorn main:app --port 8002
-
-# Terminal 3 — cicd-agent
-cd cicd-agent && pip install -r requirements.txt && uvicorn main:app --port 8003
+# Terminal 2 — datadog-agent (port 8002)
+# Terminal 3 — cicd-agent (port 8003)
 
 # Terminal 4 — sre-coordinator
 cd sre-coordinator
-export OPENAI_API_KEY=sk-...
 export GITHUB_AGENT_URL=http://localhost:8001
 export DATADOG_AGENT_URL=http://localhost:8002
 export CICD_AGENT_URL=http://localhost:8003
-pip install -r requirements.txt
-python main.py --scenario complicated
+pip install -r requirements.txt \
+  --index-url "$PIP_INDEX_URL" --extra-index-url https://pypi.org/simple
+python main.py --scenario simple
 ```
 
-## Seeded Data
+## Service endpoints
 
-- **checkout-service** — contains an obvious bug in `src/handlers/checkout.py`
-- **payments-lib** — plausible payment validation code, owned by a different team
-- **Datadog logs** — stack traces pointing to the checkout bug; separate entries for payments-lib
+| Service | Port | Endpoints |
+|---------|------|-----------|
+| github-agent | 8001 | `GET /health`, `GET /read`, `GET /list`, `POST /commit` |
+| datadog-agent | 8002 | `GET /health`, `POST /query?service=` |
+| cicd-agent | 8003 | `GET /health`, `POST /deploy` |
 
-## Explicit Constraints (by design)
-
-- No authentication, signing, tokens, or scope checks
-- No `xtap_fabric` imports
-- Services communicate over real HTTP across container boundaries
-- No hardcoded investigation paths in the coordinator
-
-This baseline must work completely before any XTAP Fabric integration in a future step.
+`/health` is unsigned (`IncomingTaskMiddleware` `skip_paths` exact match). Other routes require a valid A2A presentation from the coordinator.

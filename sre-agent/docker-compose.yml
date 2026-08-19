@@ -1,38 +1,116 @@
 services:
   github-agent:
-    build: ./github-agent
+    build:
+      context: .
+      dockerfile: github-agent/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://pypi.org/simple}
     ports:
       - "8001:8001"
+    environment:
+      XTAP_URL: ${XTAP_URL}
+      XTAP_TENANT_ID: ${XTAP_TENANT_ID}
+      XTAP_SOFTWARE_ID: ${GITHUB_AGENT_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${GITHUB_AGENT_SOFTWARE_SECRET}
+      XTAP_KEY_PASSPHRASE: ${XTAP_KEY_PASSPHRASE}
+      XTAP_AGENT_STATE_DIR: /var/lib/xtap
+      XTAP_CLIENT_ID_DIR: /shared/client-ids
+      XTAP_FABRIC_JWKS_URL: ${XTAP_FABRIC_JWKS_URL:-}
+      SRE_COORDINATOR_CLIENT_ID: ${SRE_COORDINATOR_CLIENT_ID:-}
+    volumes:
+      - ./data/github-agent:/var/lib/xtap
+      - ./data/client-ids:/shared/client-ids
     networks:
       - sre-net
 
   datadog-agent:
-    build: ./datadog-agent
+    build:
+      context: .
+      dockerfile: datadog-agent/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://pypi.org/simple}
     ports:
       - "8002:8002"
+    environment:
+      XTAP_URL: ${XTAP_URL}
+      XTAP_TENANT_ID: ${XTAP_TENANT_ID}
+      XTAP_SOFTWARE_ID: ${DATADOG_AGENT_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${DATADOG_AGENT_SOFTWARE_SECRET}
+      XTAP_KEY_PASSPHRASE: ${XTAP_KEY_PASSPHRASE}
+      XTAP_AGENT_STATE_DIR: /var/lib/xtap
+      XTAP_CLIENT_ID_DIR: /shared/client-ids
+      XTAP_FABRIC_JWKS_URL: ${XTAP_FABRIC_JWKS_URL:-}
+      SRE_COORDINATOR_CLIENT_ID: ${SRE_COORDINATOR_CLIENT_ID:-}
+    volumes:
+      - ./data/datadog-agent:/var/lib/xtap
+      - ./data/client-ids:/shared/client-ids
     networks:
       - sre-net
 
   cicd-agent:
-    build: ./cicd-agent
+    build:
+      context: .
+      dockerfile: cicd-agent/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://pypi.org/simple}
     ports:
       - "8003:8003"
+    environment:
+      XTAP_URL: ${XTAP_URL}
+      XTAP_TENANT_ID: ${XTAP_TENANT_ID}
+      XTAP_SOFTWARE_ID: ${CICD_AGENT_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${CICD_AGENT_SOFTWARE_SECRET}
+      XTAP_KEY_PASSPHRASE: ${XTAP_KEY_PASSPHRASE}
+      XTAP_AGENT_STATE_DIR: /var/lib/xtap
+      XTAP_CLIENT_ID_DIR: /shared/client-ids
+      XTAP_FABRIC_JWKS_URL: ${XTAP_FABRIC_JWKS_URL:-}
+      SRE_COORDINATOR_CLIENT_ID: ${SRE_COORDINATOR_CLIENT_ID:-}
+    volumes:
+      - ./data/cicd-agent:/var/lib/xtap
+      - ./data/client-ids:/shared/client-ids
     networks:
       - sre-net
 
   sre-coordinator:
-    build: ./sre-coordinator
+    build:
+      context: .
+      dockerfile: sre-coordinator/Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_EXTRA_INDEX_URL: ${PIP_EXTRA_INDEX_URL:-https://pypi.org/simple}
     depends_on:
       - github-agent
       - datadog-agent
       - cicd-agent
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
-      - SCENARIO=${SCENARIO:-simple}
-      - GITHUB_AGENT_URL=http://github-agent:8001
-      - DATADOG_AGENT_URL=http://datadog-agent:8002
-      - CICD_AGENT_URL=http://cicd-agent:8003
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      SCENARIO: ${SCENARIO:-simple}
+      GITHUB_AGENT_URL: http://github-agent:8001
+      DATADOG_AGENT_URL: http://datadog-agent:8002
+      CICD_AGENT_URL: http://cicd-agent:8003
+      XTAP_URL: ${XTAP_URL}
+      XTAP_TENANT_ID: ${XTAP_TENANT_ID}
+      XTAP_SOFTWARE_ID: ${SRE_COORDINATOR_SOFTWARE_ID}
+      XTAP_SOFTWARE_SECRET: ${SRE_COORDINATOR_SOFTWARE_SECRET}
+      XTAP_KEY_PASSPHRASE: ${XTAP_KEY_PASSPHRASE}
+      XTAP_AGENT_STATE_DIR: /var/lib/xtap
+      XTAP_CLIENT_ID_DIR: /shared/client-ids
+      XTAP_FABRIC_JWKS_URL: ${XTAP_FABRIC_JWKS_URL:-}
+      XTAP_CALLBACK_HOST: ${XTAP_CALLBACK_HOST:-127.0.0.1}
+      XTAP_CALLBACK_BIND_HOST: ${XTAP_CALLBACK_BIND_HOST:-0.0.0.0}
+      XTAP_CALLBACK_PORT: ${XTAP_CALLBACK_PORT:-9876}
+      GITHUB_AGENT_CLIENT_ID: ${GITHUB_AGENT_CLIENT_ID:-}
+      DATADOG_AGENT_CLIENT_ID: ${DATADOG_AGENT_CLIENT_ID:-}
+      CICD_AGENT_CLIENT_ID: ${CICD_AGENT_CLIENT_ID:-}
+    ports:
+      - "9876:9876"
+    volumes:
+      - ./data/sre-coordinator:/var/lib/xtap
+      - ./data/client-ids:/shared/client-ids
     networks:
       - sre-net
 

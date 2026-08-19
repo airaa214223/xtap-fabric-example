@@ -1,0 +1,9 @@
+# Local / Docker secrets and identity state — never commit
+.env
+data/
+
+# Python
+**/.venv/
+**/__pycache__/
+**/*.pyc
+*.egg-info/

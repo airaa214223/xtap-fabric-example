@@ -1,4 +1,4 @@
-"""SRE coordinator — LangGraph ReAct agent orchestrating downstream HTTP services."""
+"""SRE coordinator — LangGraph ReAct agent orchestrating enrolled specialists."""
 
 from __future__ import annotations
 
@@ -6,17 +6,30 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
+
+_shared = Path(__file__).resolve().parent.parent / "shared"
+if (_shared / "xtap_identity.py").is_file() and str(_shared) not in sys.path:
+    sys.path.insert(0, str(_shared))
 
 import httpx
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
+from fabric_session import FabricSession, collect_parent_authority
 from mock_slack import get_alert
-from tools import TRACKER, get_tools, print_baseline_summary, reset_tracker
+from tools import TRACKER, bind_fabric_session, get_tools, print_baseline_summary, reset_tracker
+from xtap_identity import (
+    AGENT_CICD,
+    AGENT_DATADOG,
+    AGENT_GITHUB,
+    AGENT_SRE,
+    enroll_agent_async,
+    load_dotenv_if_present,
+    wait_for_peer_client_ids,
+)
 
-GITHUB_AGENT_URL = os.environ.get("GITHUB_AGENT_URL", "http://github-agent:8001")
-DATADOG_AGENT_URL = os.environ.get("DATADOG_AGENT_URL", "http://datadog-agent:8002")
-CICD_AGENT_URL = os.environ.get("CICD_AGENT_URL", "http://cicd-agent:8003")
+load_dotenv_if_present()
 
 SYSTEM_PROMPT = """You are an SRE debugging agent responding to production alerts.
 
@@ -39,10 +52,13 @@ All tools call real downstream services. Use them in whatever order makes sense 
 
 async def wait_for_agents() -> None:
     """Block until all downstream agent services are healthy."""
+    github_url = os.environ.get("GITHUB_AGENT_URL", "http://github-agent:8001")
+    datadog_url = os.environ.get("DATADOG_AGENT_URL", "http://datadog-agent:8002")
+    cicd_url = os.environ.get("CICD_AGENT_URL", "http://cicd-agent:8003")
     endpoints = [
-        ("github-agent", f"{GITHUB_AGENT_URL}/health"),
-        ("datadog-agent", f"{DATADOG_AGENT_URL}/health"),
-        ("cicd-agent", f"{CICD_AGENT_URL}/health"),
+        ("github-agent", f"{github_url}/health"),
+        ("datadog-agent", f"{datadog_url}/health"),
+        ("cicd-agent", f"{cicd_url}/health"),
     ]
 
     print("Waiting for downstream agents to become healthy...", flush=True)
@@ -81,8 +97,16 @@ def build_agent():
     return create_react_agent(llm, get_tools(), prompt=SYSTEM_PROMPT)
 
 
-async def run_investigation(alert: dict, scenario: str) -> None:
+def _task_content(alert: dict) -> str:
+    return (
+        f"Investigate production alert for {alert['service']}: {alert['message']}. "
+        "Find the root cause and commit a fix."
+    )
+
+
+async def run_investigation(alert: dict, scenario: str, session: FabricSession) -> None:
     reset_tracker()
+    bind_fabric_session(session)
     agent = build_agent()
 
     user_message = (
@@ -133,9 +157,20 @@ async def main() -> None:
         print("ERROR: OPENAI_API_KEY environment variable is required.", flush=True)
         sys.exit(1)
 
+    fabric_agent = await enroll_agent_async(AGENT_SRE)
     await wait_for_agents()
+    await asyncio.to_thread(
+        wait_for_peer_client_ids,
+        [AGENT_GITHUB, AGENT_DATADOG, AGENT_CICD],
+    )
+
     alert = await poll_slack_for_alert(scenario)
-    await run_investigation(alert, scenario)
+    parent = await collect_parent_authority(fabric_agent, _task_content(alert))
+    session = FabricSession(fabric_agent, parent)
+    try:
+        await run_investigation(alert, scenario, session)
+    finally:
+        await session.complete_all()
 
 
 if __name__ == "__main__":

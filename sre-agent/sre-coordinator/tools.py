@@ -1,18 +1,20 @@
-"""Async LangGraph tools that call downstream agent services over HTTP."""
+"""Async LangGraph tools that call enrolled specialist agents over A2A hops."""
 
 from __future__ import annotations
 
 import json
-import os
+import sys
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
 
-import httpx
+_shared = Path(__file__).resolve().parent.parent / "shared"
+if (_shared / "xtap_identity.py").is_file() and str(_shared) not in sys.path:
+    sys.path.insert(0, str(_shared))
+
 from langchain_core.tools import tool
 
-GITHUB_AGENT_URL = os.environ.get("GITHUB_AGENT_URL", "http://github-agent:8001")
-DATADOG_AGENT_URL = os.environ.get("DATADOG_AGENT_URL", "http://datadog-agent:8002")
-CICD_AGENT_URL = os.environ.get("CICD_AGENT_URL", "http://cicd-agent:8003")
+from fabric_session import FabricSession
+from xtap_identity import AGENT_CICD, AGENT_DATADOG, AGENT_GITHUB
 
 # Team ownership for narration (checkout-service owns the alert).
 ALERT_OWNER = "checkout-service"
@@ -35,6 +37,19 @@ class CallTracker:
 
 
 TRACKER = CallTracker()
+_SESSION: FabricSession | None = None
+
+
+def bind_fabric_session(session: FabricSession) -> None:
+    """Attach the consented Fabric session used by tools for A2A hops."""
+    global _SESSION
+    _SESSION = session
+
+
+def _session() -> FabricSession:
+    if _SESSION is None:
+        raise RuntimeError("Fabric session is not bound; consent before invoking tools")
+    return _SESSION
 
 
 @tool
@@ -43,13 +58,12 @@ async def query_datadog_logs(service: str) -> str:
     TRACKER.log(f"[call] POST datadog-agent/query -> service={service}")
     TRACKER.services_queried.add(service)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{DATADOG_AGENT_URL}/query",
-            params={"service": service},
-        )
-        response.raise_for_status()
-        data = response.json()
+    data = await _session().a2a_request(
+        AGENT_DATADOG,
+        "POST",
+        "/query",
+        params={"service": service},
+    )
 
     logs = data.get("logs", [])
     if not logs:
@@ -62,13 +76,12 @@ async def list_repo_files(repo: str) -> str:
     """List file paths in a GitHub repository. Use before reading specific files."""
     TRACKER.log(f"[call] GET github-agent/list -> repo={repo}")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{GITHUB_AGENT_URL}/list",
-            params={"repo": repo},
-        )
-        response.raise_for_status()
-        data = response.json()
+    data = await _session().a2a_request(
+        AGENT_GITHUB,
+        "GET",
+        "/list",
+        params={"repo": repo},
+    )
 
     files = data.get("files", [])
     TRACKER.repos_read.add(repo)
@@ -80,13 +93,12 @@ async def read_repo_file(repo: str, path: str) -> str:
     """Read a file from a GitHub repository. Use to inspect source code for bugs."""
     TRACKER.log(f"[call] GET github-agent/read -> repo={repo}, path={path}")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{GITHUB_AGENT_URL}/read",
-            params={"repo": repo, "path": path},
-        )
-        response.raise_for_status()
-        data = response.json()
+    data = await _session().a2a_request(
+        AGENT_GITHUB,
+        "GET",
+        "/read",
+        params={"repo": repo, "path": path},
+    )
 
     TRACKER.repos_read.add(repo)
     content = data.get("content", "")
@@ -100,13 +112,12 @@ async def commit_fix(repo: str, diff: str, description: str) -> str:
         f"[call] POST github-agent/commit -> repo={repo}, description={description!r}"
     )
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{GITHUB_AGENT_URL}/commit",
-            json={"repo": repo, "diff": diff},
-        )
-        response.raise_for_status()
-        data = response.json()
+    data = await _session().a2a_request(
+        AGENT_GITHUB,
+        "POST",
+        "/commit",
+        json_body={"repo": repo, "diff": diff},
+    )
 
     TRACKER.repos_committed.add(repo)
     mr_url = data.get("mr_url", "unknown")
@@ -125,13 +136,12 @@ async def trigger_deploy(product: str) -> str:
     TRACKER.log(f"[call] POST cicd-agent/deploy -> product={product}")
     TRACKER.products_deployed.add(product)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{CICD_AGENT_URL}/deploy",
-            json={"product": product},
-        )
-        response.raise_for_status()
-        data = response.json()
+    data = await _session().a2a_request(
+        AGENT_CICD,
+        "POST",
+        "/deploy",
+        json_body={"product": product},
+    )
 
     return json.dumps(data, indent=2)
 
@@ -157,7 +167,7 @@ def print_baseline_summary(scenario: str) -> None:
     out_of_scope_committed = TRACKER.repos_committed & OUT_OF_SCOPE_REPOS
 
     print("\n" + "=" * 60, flush=True)
-    print("=== Baseline run complete ===", flush=True)
+    print("=== Fabric run complete ===", flush=True)
     print(f"Scenario: {scenario}", flush=True)
     print(f"Alert owner service: {ALERT_OWNER}", flush=True)
     print(f"Services queried: {sorted(TRACKER.services_queried) or '(none)'}", flush=True)
@@ -173,8 +183,8 @@ def print_baseline_summary(scenario: str) -> None:
         action = " and ".join(parts)
         print(
             f"\nThis agent {action}, "
-            f"repositories outside the team that owns this alert ({ALERT_OWNER}), "
-            "and nothing in this architecture — across separate services — prevented it.",
+            f"repositories outside the team that owns this alert ({ALERT_OWNER}). "
+            "A2A hops were identity-bound; repo ownership is not an ACT action in this demo.",
             flush=True,
         )
     elif scenario == "simple":
@@ -185,7 +195,8 @@ def print_baseline_summary(scenario: str) -> None:
             )
         else:
             print(
-                "\nInvestigation stayed within checkout-service ownership. No scope enforcement was applied.",
+                "\nInvestigation stayed within checkout-service ownership. "
+                "Repo ownership is still application policy, not an ACT action.",
                 flush=True,
             )
 
